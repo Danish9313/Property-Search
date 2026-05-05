@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Debt Recovery Analysis</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      background: #f0f2f5;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 12px;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+      width: 100%;
+      max-width: 560px;
+      padding: 40px 36px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 28px;
+    }
+
+    .logo-icon {
+      width: 40px; height: 40px;
+      background: #1a56db;
+      border-radius: 9px;
+      display: flex; align-items: center; justify-content: center;
+    }
+
+    .logo-icon svg { width: 22px; height: 22px; fill: #fff; }
+
+    h1 { font-size: 20px; color: #111827; font-weight: 700; }
+    .subtitle { font-size: 13px; color: #6b7280; margin-top: 2px; }
+
+    .divider { border: none; border-top: 1px solid #e5e7eb; margin: 24px 0; }
+
+    label {
+      display: block;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      margin-bottom: 6px;
+    }
+
+    .upload-box {
+      border: 2px dashed #d1d5db;
+      border-radius: 8px;
+      padding: 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      margin-bottom: 16px;
+      position: relative;
+    }
+
+    .upload-box:hover, .upload-box.dragover {
+      border-color: #1a56db;
+      background: #eff6ff;
+    }
+
+    .upload-box.has-file {
+      border-color: #16a34a;
+      background: #f0fdf4;
+    }
+
+    .upload-box input[type="file"] {
+      position: absolute; inset: 0;
+      opacity: 0; cursor: pointer; width: 100%; height: 100%;
+    }
+
+    .upload-icon { font-size: 28px; margin-bottom: 6px; }
+
+    .upload-box .upload-label {
+      font-size: 13px; color: #6b7280;
+    }
+
+    .upload-box .upload-label span {
+      color: #1a56db; font-weight: 600;
+    }
+
+    .upload-box .file-name {
+      font-size: 13px; color: #16a34a;
+      font-weight: 600; margin-top: 4px;
+      overflow: hidden; text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .upload-box .file-hint {
+      font-size: 11px; color: #9ca3af; margin-top: 4px;
+    }
+
+    .optional-row {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .optional-row label { margin-bottom: 0; white-space: nowrap; }
+
+    .optional-row input[type="number"] {
+      width: 100px;
+      padding: 8px 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font-size: 13px;
+      color: #111827;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .optional-row input[type="number"]:focus { border-color: #1a56db; }
+
+    .optional-hint { font-size: 12px; color: #9ca3af; }
+
+    .btn {
+      width: 100%;
+      padding: 13px;
+      background: #1a56db;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn:hover:not(:disabled) { background: #1648c0; }
+    .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    /* Spinner */
+    .spinner {
+      width: 18px; height: 18px;
+      border: 3px solid rgba(255,255,255,0.4);
+      border-top-color: #fff;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Status box */
+    .status-box {
+      margin-top: 20px;
+      padding: 14px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      display: none;
+    }
+
+    .status-box.info    { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; }
+    .status-box.success { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+    .status-box.error   { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+
+    .status-box .status-title { font-weight: 700; margin-bottom: 4px; }
+
+    /* Progress bar */
+    .progress-wrap {
+      margin-top: 10px;
+      background: #dbeafe;
+      border-radius: 999px;
+      height: 6px;
+      overflow: hidden;
+      display: none;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: #1a56db;
+      border-radius: 999px;
+      width: 0%;
+      transition: width 0.4s ease;
+      animation: indeterminate 1.5s ease infinite;
+    }
+
+    @keyframes indeterminate {
+      0%   { transform: translateX(-100%); width: 60%; }
+      100% { transform: translateX(200%);  width: 60%; }
+    }
+
+    .progress-bar.done { animation: none; width: 100%; background: #16a34a; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+
+  <!-- Logo -->
+  <div class="logo">
+    <div class="logo-icon">
+      <svg viewBox="0 0 24 24"><path d="M3 3h18v4H3zm0 6h18v4H3zm0 6h18v4H3z"/></svg>
+    </div>
+    <div>
+      <h1>Debt Recovery Analysis</h1>
+      <div class="subtitle">AI-powered property collateral analysis</div>
+    </div>
+  </div>
+
+  <hr class="divider"/>
+
+  <form id="analyzeForm">
+
+    <!-- Excel Upload -->
+    <label>Customer Excel File</label>
+    <div class="upload-box" id="excelBox">
+      <input type="file" id="excelInput" accept=".xlsx,.xls,.ods" />
+      <div class="upload-icon">📊</div>
+      <div class="upload-label"><span>Click to upload</span> or drag & drop</div>
+      <div class="file-hint">Supported: .xlsx, .xls, .ods</div>
+      <div class="file-name" id="excelName" style="display:none"></div>
+    </div>
+
+    <!-- JSON ZIP Upload -->
+    <label>Property JSON Folder (ZIP)</label>
+    <div class="upload-box" id="zipBox">
+      <input type="file" id="zipInput" accept=".zip" />
+      <div class="upload-icon">🗂️</div>
+      <div class="upload-label"><span>Click to upload</span> or drag & drop</div>
+      <div class="file-hint">Right-click your JSON folder → Send to → Compressed (zipped)</div>
+      <div class="file-name" id="zipName" style="display:none"></div>
+    </div>
+
+    <!-- Optional: max rows -->
+    <div class="optional-row">
+      <label for="maxRows">Test rows (optional)</label>
+      <input type="number" id="maxRows" placeholder="All rows" min="1" />
+      <span class="optional-hint">Leave blank to process all rows</span>
+    </div>
+
+    <!-- Submit -->
+    <button class="btn" type="submit" id="submitBtn" disabled>
+      <span id="btnText">Run Analysis</span>
+    </button>
+
+  </form>
+
+  <!-- Status -->
+  <div class="status-box info" id="statusBox">
+    <div class="status-title" id="statusTitle">Processing...</div>
+    <div id="statusMsg"></div>
+  </div>
+
+  <!-- Progress bar -->
+  <div class="progress-wrap" id="progressWrap">
+    <div class="progress-bar" id="progressBar"></div>
+  </div>
+
+</div>
+
+<script>
+  const excelInput = document.getElementById('excelInput');
+  const zipInput   = document.getElementById('zipInput');
+  const excelBox   = document.getElementById('excelBox');
+  const zipBox     = document.getElementById('zipBox');
+  const excelName  = document.getElementById('excelName');
+  const zipName    = document.getElementById('zipName');
+  const submitBtn  = document.getElementById('submitBtn');
+  const statusBox  = document.getElementById('statusBox');
+  const statusTitle= document.getElementById('statusTitle');
+  const statusMsg  = document.getElementById('statusMsg');
+  const progressWrap = document.getElementById('progressWrap');
+  const progressBar  = document.getElementById('progressBar');
+  const btnText    = document.getElementById('btnText');
+
+  // File selection display
+  function onFileSelected(input, box, nameEl) {
+    const file = input.files[0];
+    if (!file) return;
+    nameEl.textContent = '✓ ' + file.name;
+    nameEl.style.display = 'block';
+    box.classList.add('has-file');
+    checkReady();
+  }
+
+  excelInput.addEventListener('change', () => onFileSelected(excelInput, excelBox, excelName));
+  zipInput.addEventListener('change',   () => onFileSelected(zipInput,   zipBox,   zipName));
+
+  // Drag & drop highlight
+  [excelBox, zipBox].forEach(box => {
+    box.addEventListener('dragover',  e => { e.preventDefault(); box.classList.add('dragover'); });
+    box.addEventListener('dragleave', () => box.classList.remove('dragover'));
+    box.addEventListener('drop',      e => {
+      e.preventDefault();
+      box.classList.remove('dragover');
+      const inp = box.querySelector('input[type=file]');
+      inp.files = e.dataTransfer.files;
+      inp.dispatchEvent(new Event('change'));
+    });
+  });
+
+  function checkReady() {
+    submitBtn.disabled = !(excelInput.files[0] && zipInput.files[0]);
+  }
+
+  function showStatus(type, title, msg) {
+    statusBox.className = 'status-box ' + type;
+    statusBox.style.display = 'block';
+    statusTitle.textContent = title;
+    statusMsg.textContent = msg;
+  }
+
+  // Form submit
+  document.getElementById('analyzeForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    const excel = excelInput.files[0];
+    const zip   = zipInput.files[0];
+    if (!excel || !zip) return;
+
+    // UI: loading state
+    submitBtn.disabled = true;
+    btnText.innerHTML = '<div class="spinner"></div> Running Analysis...';
+    progressWrap.style.display = 'block';
+    progressBar.style.animation = 'indeterminate 1.5s ease infinite';
+    progressBar.classList.remove('done');
+    showStatus('info', '⏳ Processing...', 'Uploading files and running AI analysis. This may take 1–3 minutes.');
+
+    const formData = new FormData();
+    formData.append('excel_file', excel);
+    formData.append('json_zip',   zip);
+    const maxRows = document.getElementById('maxRows').value;
+    if (maxRows) formData.append('max_rows', maxRows);
+
+    try {
+      const response = await fetch('/analyze', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: response.statusText }));
+        throw new Error(err.detail || 'Unknown error');
+      }
+
+      // Download the file
+      const blob = await response.blob();
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = 'debt_recovery_output.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      // Success UI
+      progressBar.style.animation = 'none';
+      progressBar.classList.add('done');
+      showStatus('success', '✅ Analysis Complete!', 'Your result Excel file has been downloaded.');
+      btnText.innerHTML = 'Run Analysis';
+      submitBtn.disabled = false;
+
+    } catch (err) {
+      progressWrap.style.display = 'none';
+      showStatus('error', '❌ Error', err.message);
+      btnText.innerHTML = 'Run Analysis';
+      submitBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>

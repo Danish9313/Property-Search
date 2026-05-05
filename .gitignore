@@ -1,0 +1,28 @@
+# Environment & secrets
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.venv/
+
+# Sensitive data files (customer/financial data)
+*.xlsx
+*.xls
+*.ods
+*.zip
+
+# Temp job output
+temp_jobs/
+server.log
+
+# Claude Code local settings
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
