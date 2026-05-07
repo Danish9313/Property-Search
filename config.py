@@ -43,6 +43,14 @@ JSON_FOLDER_PATH: str = os.getenv("JSON_FOLDER_PATH", "json_data")
 OUTPUT_FILE_PATH: str = os.getenv("OUTPUT_FILE_PATH", "debt_recovery_output.xlsx")
 
 # ---------------------------------------------------------------------------
+# Browser / Playwright settings
+# ---------------------------------------------------------------------------
+
+# Set to true to run the browser in headless mode (no visible window)
+# Leave false so you can see Gemini working and log in on first run
+BROWSER_HEADLESS: bool = os.getenv("BROWSER_HEADLESS", "false").lower() in ("true", "1", "yes")
+
+# ---------------------------------------------------------------------------
 # Pipeline behavior
 # ---------------------------------------------------------------------------
 

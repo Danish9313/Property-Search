@@ -20,10 +20,9 @@ import logging
 from pathlib import Path
 from typing import Optional
 import pandas as pd
-from google import genai
-from google.genai import types as genai_types
 from rapidfuzz import process, fuzz
 import config
+from browser_gemini import call_gemini_browser, close_browser
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -347,22 +346,11 @@ OUTPUT: Return ONLY valid JSON matching this exact schema — no explanation, no
     return prompt.strip()
 
 # ---------------------------------------------------------------------------
-# Gemini API caller
+# Gemini browser caller
 # ---------------------------------------------------------------------------
 def call_claude_api(prompt: str, api_key: str) -> str:
-    """Send the analysis prompt to Gemini and return the raw text response."""
-    client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(
-        model=config.GEMINI_MODEL,
-        contents=prompt,
-        config=genai_types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=config.GEMINI_MAX_OUTPUT_TOKENS,
-            # Disable thinking to preserve all tokens for JSON output
-            thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return response.text if response.text else ""
+    """Submit the analysis prompt to Gemini via browser (web search enabled) and return the response."""
+    return call_gemini_browser(prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -716,6 +704,7 @@ def main():
 
     # Write output
     write_results(df, all_results, output_path)
+    close_browser()
     logger.info("Pipeline complete.")
 
 
