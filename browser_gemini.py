@@ -151,6 +151,16 @@ def _type_and_send(page: Page, prompt: str):
     page.keyboard.press("Control+v")
     time.sleep(2)
 
+    # Verify how many chars are actually in the input field after paste
+    pasted_len = page.evaluate("""
+        () => {
+            const el = document.querySelector('rich-textarea [contenteditable="true"]')
+                    || document.querySelector('div[contenteditable="true"]');
+            return el ? el.innerText.length : 0;
+        }
+    """)
+    logger.info(f"Chars in prompt: {len(prompt)} | Chars pasted into Gemini: {pasted_len}")
+
     # Try send button first, then Enter
     send_selectors = [
         'button[aria-label*="Send"]',
@@ -169,7 +179,7 @@ def _type_and_send(page: Page, prompt: str):
 
 
 def _wait_and_extract(page: Page, timeout: int = 180) -> str:
-    """Poll until Gemini stops generating, then return the complete response text."""
+    """Poll until Gemini stops generating, then return the LAST model response text only."""
     response_selectors = [
         'model-response',
         '.response-container',
@@ -184,16 +194,13 @@ def _wait_and_extract(page: Page, timeout: int = 180) -> str:
                 els = page.locator(sel).all()
                 if els:
                     text = els[-1].inner_text(timeout=2000).strip()
-                    if text:
+                    if text and len(text) < 15000:  # ignore huge page dumps
                         return text
             except Exception:
                 continue
-        try:
-            return page.locator("main").inner_text(timeout=2000).strip()
-        except Exception:
-            return ""
+        return ""  # never fall back to main — avoids grabbing full page
 
-    # Wait long enough for large prompts to start generating
+    # Wait for large prompts to start generating
     time.sleep(10)
 
     prev_text = ""
@@ -205,12 +212,10 @@ def _wait_and_extract(page: Page, timeout: int = 180) -> str:
 
         if current_text and current_text == prev_text:
             stable_count += 1
-            # Only accept as complete if text ends with } (valid JSON end)
             if stable_count >= 6 and current_text.rstrip().endswith("}"):
                 logger.info("Response stable — extraction complete.")
                 return current_text
             elif stable_count >= 20:
-                # Fallback: return whatever we have after 20s of stability
                 logger.warning("Response stable but no closing } — returning anyway.")
                 return current_text
         else:
@@ -223,6 +228,28 @@ def _wait_and_extract(page: Page, timeout: int = 180) -> str:
     return prev_text
 
 
+# Required output field names — used to detect wrong schema
+_REQUIRED_FIELDS = [
+    "Verified Equity", "Verified Liens", "Homestead Applied", "Homestead State",
+    "Final Collateral", "Collateral Calculation", "Collateralization",
+    "Principal Balance", "Collectibility Judgment", "Recovery Summary",
+    "Lien Enforcement", "notes",
+]
+
+_REFORMAT_MSG = (
+    "Your response used the wrong field names. "
+    "Now output ONLY this JSON with EXACTLY these field names filled from your analysis. "
+    "No explanation. Start with { end with }:\n\n"
+    "{\n"
+    + "\n".join(f'  "{f}": "",' for f in _REQUIRED_FIELDS)
+    + "\n}"
+)
+
+
+def _uses_correct_schema(text: str) -> bool:
+    return all(f'"{f}"' in text for f in _REQUIRED_FIELDS)
+
+
 # ---------------------------------------------------------------------------
 # Public entry point (called by main.py in place of the API)
 # ---------------------------------------------------------------------------
@@ -230,6 +257,7 @@ def _wait_and_extract(page: Page, timeout: int = 180) -> str:
 def call_gemini_browser(prompt: str) -> str:
     """
     Submit prompt to Gemini via browser with Web Search enabled.
+    If Gemini returns the wrong schema, sends a follow-up to reformat.
     Returns the raw response text.
     """
     page = _start_browser()
@@ -238,11 +266,21 @@ def call_gemini_browser(prompt: str) -> str:
         _enable_web_search(page)
         _type_and_send(page, prompt)
         response = _wait_and_extract(page)
+
         logger.info(f"Gemini response length: {len(response)} chars")
         if response:
             logger.info(f"Gemini response preview: {response[:300]}")
         else:
             logger.warning("Gemini returned empty response.")
+            return response
+
+        # If wrong schema — send reformat follow-up in the same chat
+        if not _uses_correct_schema(response):
+            logger.info("Wrong schema — sending reformat follow-up.")
+            _type_and_send(page, _REFORMAT_MSG)
+            response = _wait_and_extract(page)
+            logger.info(f"Reformat response: {len(response)} chars | preview: {response[:200]}")
+
         return response
     except Exception as e:
         logger.error(f"Gemini browser error: {e}")

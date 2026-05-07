@@ -289,12 +289,13 @@ def build_analysis_prompt(row: pd.Series, property_data: list[tuple]) -> str:
             continue
         row_context[str(col)] = str(val).strip()
 
-    # Build per-property sections
+    # Build per-property sections — use summary instead of full JSON to stay under paste limit
     props_payload = []
     missing_json = []
     for label, address, json_data in property_data:
         if json_data is not None:
-            props_payload.append({"label": label, "address": address, "data": json_data})
+            summary = extract_property_summary(json_data, label)
+            props_payload.append({"label": label, "address": address, "summary": summary})
         else:
             missing_json.append(f"{label} ({address})")
 
