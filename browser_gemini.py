@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright, Playwright, BrowserContext, Pag
 from pathlib import Path
 import time
 import logging
+import pyperclip
 import config
 
 logger = logging.getLogger(__name__)
@@ -80,23 +81,9 @@ def close_browser():
 # ---------------------------------------------------------------------------
 
 def _new_chat(page: Page):
-    """Navigate to a fresh conversation so rows don't bleed into each other."""
-    try:
-        for selector in [
-            'a[href="/app"]',
-            'button[aria-label*="New chat"]',
-            'button[aria-label*="New conversation"]',
-        ]:
-            btn = page.locator(selector)
-            if btn.count() > 0 and btn.first.is_visible(timeout=2000):
-                btn.first.click()
-                time.sleep(1.5)
-                return
-    except Exception:
-        pass
-    # Fallback: reload the app URL
-    page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=20000)
-    time.sleep(1.5)
+    """Always navigate to a fresh URL to guarantee a clean conversation."""
+    page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=30000)
+    time.sleep(2)
 
 
 def _enable_web_search(page: Page):
@@ -147,6 +134,10 @@ def _type_and_send(page: Page, prompt: str):
     if input_el is None:
         raise RuntimeError("Could not locate Gemini input field.")
 
+    # Copy full prompt to OS clipboard (no size limit, works with any length)
+    pyperclip.copy(prompt)
+    logger.info(f"Prompt copied to clipboard: {len(prompt)} chars")
+
     # Click input to focus it
     input_el.click()
     time.sleep(0.5)
@@ -156,20 +147,9 @@ def _type_and_send(page: Page, prompt: str):
     page.keyboard.press("Delete")
     time.sleep(0.3)
 
-    # Insert text via execCommand — works with Gemini's Angular contenteditable
-    page.evaluate(
-        """(text) => {
-            const el = document.querySelector('rich-textarea [contenteditable="true"]')
-                    || document.querySelector('div[contenteditable="true"]');
-            if (el) {
-                el.focus();
-                document.execCommand('selectAll');
-                document.execCommand('insertText', false, text);
-            }
-        }""",
-        prompt,
-    )
-    time.sleep(1)
+    # Paste from OS clipboard — guaranteed to paste the full text
+    page.keyboard.press("Control+v")
+    time.sleep(2)
 
     # Try send button first, then Enter
     send_selectors = [
@@ -213,8 +193,8 @@ def _wait_and_extract(page: Page, timeout: int = 180) -> str:
         except Exception:
             return ""
 
-    # Wait for response to start appearing
-    time.sleep(4)
+    # Wait long enough for large prompts to start generating
+    time.sleep(10)
 
     prev_text = ""
     stable_count = 0
@@ -225,8 +205,13 @@ def _wait_and_extract(page: Page, timeout: int = 180) -> str:
 
         if current_text and current_text == prev_text:
             stable_count += 1
-            if stable_count >= 4:   # unchanged for 4 seconds = generation done
+            # Only accept as complete if text ends with } (valid JSON end)
+            if stable_count >= 6 and current_text.rstrip().endswith("}"):
                 logger.info("Response stable — extraction complete.")
+                return current_text
+            elif stable_count >= 20:
+                # Fallback: return whatever we have after 20s of stability
+                logger.warning("Response stable but no closing } — returning anyway.")
                 return current_text
         else:
             stable_count = 0

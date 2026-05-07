@@ -340,8 +340,15 @@ INSTRUCTIONS:
 7. Use null (not empty string) for any field where data is genuinely unavailable.
 {f'9. NOTE: {missing_note}' if missing_note else ''}
 
-OUTPUT: Return ONLY valid JSON matching this exact schema — no explanation, no markdown:
+════════════════════════════════════════════════
+MANDATORY OUTPUT — DO NOT DEVIATE
+════════════════════════════════════════════════
+Respond with ONLY this JSON object.
+Use EXACTLY these field names — no renaming, no nesting, no extra fields.
+Do NOT explain. Do NOT add narrative. Start with {{ end with }}.
+
 {json.dumps(output_schema, indent=2)}
+════════════════════════════════════════════════
 """
     return prompt.strip()
 
@@ -350,7 +357,8 @@ OUTPUT: Return ONLY valid JSON matching this exact schema — no explanation, no
 # ---------------------------------------------------------------------------
 def call_claude_api(prompt: str, api_key: str) -> str:
     """Submit the analysis prompt to Gemini via browser (web search enabled) and return the response."""
-    return call_gemini_browser(prompt)
+    full_prompt = f"{SYSTEM_PROMPT}\n\n{'='*60}\n\n{prompt}"
+    return call_gemini_browser(full_prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +509,8 @@ def process_row(
     # Dynamically detect property columns from this row's index
     property_cols = detect_property_columns(list(row.index))
 
-    # Collect property addresses and their JSON data
+    # Collect only properties that have a confirmed JSON match
+    # If no JSON match — skip that property entirely (no web search)
     property_data: list[tuple] = []
     for addr_col, _equity_col, label in property_cols:
         addr_val = row.get(addr_col)
@@ -509,15 +518,16 @@ def process_row(
             continue
         logger.info(f"  Row {cust_id}: Looking up JSON for [{label}] -> '{addr_val}'")
         json_data = json_store.find(addr_val)
-        if not json_data:
-            logger.warning(f"  Row {cust_id}: No JSON match for '{addr_val}'")
-        property_data.append((label, addr_val, json_data))
+        if json_data:
+            property_data.append((label, addr_val, json_data))
+        else:
+            logger.warning(f"  Row {cust_id}: No JSON match for '{addr_val}' — skipped.")
 
     if not property_data:
-        logger.warning(f"  Row {cust_id}: No property addresses found. Skipping AI call.")
+        logger.warning(f"  Row {cust_id}: No JSON-matched properties found. Skipping AI call.")
         blank = {col: "" for col in AI_OUTPUT_COLUMNS}
         blank["Collectibility Judgment"] = "Low"
-        blank["notes"] = "No property addresses found in this row."
+        blank["notes"] = "No JSON-matched property data found for this row."
         return blank
 
     # Calculate Verified Equity from Excel estimated equity columns
@@ -584,10 +594,20 @@ def write_results(
     safe_df = original_df.drop(columns=[c for c in drop_cols if c in original_df.columns], errors="ignore")
     combined_df = pd.concat([safe_df.reset_index(drop=True), results_df.reset_index(drop=True)], axis=1)
 
-    # Write to Excel
-    with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        combined_df.to_excel(writer, sheet_name="DataSheet", index=False)
-        results_df.to_excel(writer, sheet_name="AI_Analysis", index=False)
+    # Write to Excel — if file is locked (open in Excel), save with timestamp
+    try:
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            combined_df.to_excel(writer, sheet_name="DataSheet", index=False)
+            results_df.to_excel(writer, sheet_name="AI_Analysis", index=False)
+    except PermissionError:
+        from datetime import datetime
+        stem = Path(output_path).stem
+        parent = Path(output_path).parent
+        output_path = str(parent / f"{stem}_{datetime.now().strftime('%H%M%S')}.xlsx")
+        logger.warning(f"Output file locked — saving to: {output_path}")
+        with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
+            combined_df.to_excel(writer, sheet_name="DataSheet", index=False)
+            results_df.to_excel(writer, sheet_name="AI_Analysis", index=False)
 
     # Apply formatting
     from openpyxl import load_workbook
