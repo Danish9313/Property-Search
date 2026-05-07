@@ -41,6 +41,7 @@ def _start_browser() -> Page:
         headless=config.BROWSER_HEADLESS,
         args=["--start-maximized"],
         viewport=None,
+        permissions=["clipboard-read", "clipboard-write"],
     )
     _page = _context.new_page()
     _page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=30000)
@@ -126,7 +127,7 @@ def _enable_web_search(page: Page):
 
 
 def _type_and_send(page: Page, prompt: str):
-    """Type the prompt into Gemini's input box and send it."""
+    """Paste the prompt into Gemini's input box via clipboard and send it."""
     input_selectors = [
         'rich-textarea [contenteditable="true"]',
         '[contenteditable="true"][aria-label*="message"]',
@@ -146,13 +147,29 @@ def _type_and_send(page: Page, prompt: str):
     if input_el is None:
         raise RuntimeError("Could not locate Gemini input field.")
 
+    # Click input to focus it
     input_el.click()
-    time.sleep(0.3)
-    input_el.press("Control+a")
-    input_el.press("Delete")
-    time.sleep(0.2)
-    page.keyboard.type(prompt, delay=5)
     time.sleep(0.5)
+
+    # Clear existing content
+    page.keyboard.press("Control+a")
+    page.keyboard.press("Delete")
+    time.sleep(0.3)
+
+    # Insert text via execCommand — works with Gemini's Angular contenteditable
+    page.evaluate(
+        """(text) => {
+            const el = document.querySelector('rich-textarea [contenteditable="true"]')
+                    || document.querySelector('div[contenteditable="true"]');
+            if (el) {
+                el.focus();
+                document.execCommand('selectAll');
+                document.execCommand('insertText', false, text);
+            }
+        }""",
+        prompt,
+    )
+    time.sleep(1)
 
     # Try send button first, then Enter
     send_selectors = [
@@ -171,36 +188,8 @@ def _type_and_send(page: Page, prompt: str):
     page.keyboard.press("Enter")
 
 
-def _wait_and_extract(page: Page, timeout: int = 120) -> str:
-    """Wait for Gemini to finish generating then return the response text."""
-    time.sleep(3)
-
-    # Wait until loading indicators disappear
-    loading_selectors = [
-        '.loading-indicator',
-        '[aria-label*="loading"]',
-        '[aria-label*="Generating"]',
-        '.generating',
-        'model-response.generating',
-    ]
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        loading = False
-        for sel in loading_selectors:
-            try:
-                el = page.locator(sel)
-                if el.count() > 0 and el.first.is_visible(timeout=500):
-                    loading = True
-                    break
-            except Exception:
-                pass
-        if not loading:
-            break
-        time.sleep(1)
-
-    time.sleep(2)
-
-    # Extract response — try selectors in order
+def _wait_and_extract(page: Page, timeout: int = 180) -> str:
+    """Poll until Gemini stops generating, then return the complete response text."""
     response_selectors = [
         'model-response',
         '.response-container',
@@ -208,21 +197,45 @@ def _wait_and_extract(page: Page, timeout: int = 120) -> str:
         '.model-response-text',
         'message-content',
     ]
-    for sel in response_selectors:
-        try:
-            els = page.locator(sel).all()
-            if els:
-                text = els[-1].inner_text(timeout=5000).strip()
-                if text:
-                    return text
-        except Exception:
-            continue
 
-    # Last fallback
-    try:
-        return page.locator("main").inner_text(timeout=5000).strip()
-    except Exception:
-        return ""
+    def _get_current_text() -> str:
+        for sel in response_selectors:
+            try:
+                els = page.locator(sel).all()
+                if els:
+                    text = els[-1].inner_text(timeout=2000).strip()
+                    if text:
+                        return text
+            except Exception:
+                continue
+        try:
+            return page.locator("main").inner_text(timeout=2000).strip()
+        except Exception:
+            return ""
+
+    # Wait for response to start appearing
+    time.sleep(4)
+
+    prev_text = ""
+    stable_count = 0
+    deadline = time.time() + timeout
+
+    while time.time() < deadline:
+        current_text = _get_current_text()
+
+        if current_text and current_text == prev_text:
+            stable_count += 1
+            if stable_count >= 4:   # unchanged for 4 seconds = generation done
+                logger.info("Response stable — extraction complete.")
+                return current_text
+        else:
+            stable_count = 0
+
+        prev_text = current_text
+        time.sleep(1)
+
+    logger.warning("Timed out waiting for stable response — returning what we have.")
+    return prev_text
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +253,11 @@ def call_gemini_browser(prompt: str) -> str:
         _enable_web_search(page)
         _type_and_send(page, prompt)
         response = _wait_and_extract(page)
-        logger.debug(f"Gemini browser response: {len(response)} chars")
+        logger.info(f"Gemini response length: {len(response)} chars")
+        if response:
+            logger.info(f"Gemini response preview: {response[:300]}")
+        else:
+            logger.warning("Gemini returned empty response.")
         return response
     except Exception as e:
         logger.error(f"Gemini browser error: {e}")

@@ -363,6 +363,13 @@ def parse_ai_response(response: str) -> dict:
     """
     blank = {col: "" for col in AI_OUTPUT_COLUMNS}
 
+    # Write raw response to debug file for inspection
+    try:
+        with open("debug_last_response.txt", "w", encoding="utf-8") as f:
+            f.write(response)
+    except Exception:
+        pass
+
     # Strip markdown code fences if present
     text = response.strip()
     text = re.sub(r"```(?:json)?\s*", "", text, flags=re.IGNORECASE)
