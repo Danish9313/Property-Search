@@ -16,18 +16,23 @@ except ImportError:
     pass
 
 # ---------------------------------------------------------------------------
-# Gemini API
+# OpenRouter API
 # ---------------------------------------------------------------------------
 
-# Your Gemini API key from https://aistudio.google.com/app/apikey
-GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+# Your OpenRouter API key from https://openrouter.ai/keys
+OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 
-# Gemini model to use for analysis
-# Options: "gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash"
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+# OpenRouter model to use for analysis
+# Options: "google/gemini-2.5-pro", "google/gemini-2.5-flash", "anthropic/claude-3-5-sonnet"
+OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-pro")
 
 # Max tokens in the AI response per customer row
-GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "2000"))
+OPENROUTER_MAX_OUTPUT_TOKENS: int = int(os.getenv("OPENROUTER_MAX_OUTPUT_TOKENS", "8192"))
+
+# Keep these as aliases so any code referencing old names still works
+GEMINI_API_KEY: str = OPENROUTER_API_KEY
+GEMINI_MODEL: str = OPENROUTER_MODEL
+GEMINI_MAX_OUTPUT_TOKENS: int = OPENROUTER_MAX_OUTPUT_TOKENS
 
 # ---------------------------------------------------------------------------
 # File paths
@@ -69,10 +74,10 @@ def validate():
     """Raise an error early if required config values are missing."""
     errors = []
 
-    if not GEMINI_API_KEY:
+    if not OPENROUTER_API_KEY:
         errors.append(
-            "GEMINI_API_KEY is not set. Add it to your .env file:\n"
-            "  GEMINI_API_KEY=AIzaSy..."
+            "OPENROUTER_API_KEY is not set. Add it to your .env file:\n"
+            "  OPENROUTER_API_KEY=sk-or-v1-..."
         )
 
     if not Path(EXCEL_FILE_PATH).exists():
@@ -96,9 +101,9 @@ def validate():
 if __name__ == "__main__":
     # Quick check: print current config (masks API key)
     print("Current configuration:")
-    print(f"  GEMINI_API_KEY        : {'*' * 8 + GEMINI_API_KEY[-4:] if GEMINI_API_KEY else 'NOT SET'}")
-    print(f"  GEMINI_MODEL          : {GEMINI_MODEL}")
-    print(f"  GEMINI_MAX_OUTPUT_TOKENS: {GEMINI_MAX_OUTPUT_TOKENS}")
+    print(f"  OPENROUTER_API_KEY    : {'*' * 8 + OPENROUTER_API_KEY[-4:] if OPENROUTER_API_KEY else 'NOT SET'}")
+    print(f"  OPENROUTER_MODEL      : {OPENROUTER_MODEL}")
+    print(f"  OPENROUTER_MAX_OUTPUT_TOKENS: {OPENROUTER_MAX_OUTPUT_TOKENS}")
     print(f"  EXCEL_FILE_PATH       : {EXCEL_FILE_PATH}")
     print(f"  JSON_FOLDER_PATH      : {JSON_FOLDER_PATH}")
     print(f"  OUTPUT_FILE_PATH      : {OUTPUT_FILE_PATH}")

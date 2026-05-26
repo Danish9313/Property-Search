@@ -14,6 +14,7 @@ Requirements:
 
 import os
 import re
+import sys
 import json
 import argparse
 import logging
@@ -22,7 +23,7 @@ from typing import Optional
 import pandas as pd
 from rapidfuzz import process, fuzz
 import config
-from browser_gemini import call_gemini_browser, close_browser
+def close_browser(): pass  # no-op — browser not used when calling API directly
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -97,59 +98,86 @@ def json_filename_from_address(addr: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# JSON folder loader
+# Customer data store (customer_id based, all files: TXT + PDF)
 # ---------------------------------------------------------------------------
-class JsonPropertyStore:
+class CustomerDataStore:
     """
-    Loads all JSON files from a directory once at startup.
-    Keys: normalized address string  -> parsed JSON dict
+    Lazy-loading store: scans folder names at startup, reads files only when find() is called.
+    Folder naming convention: "{customer_id} - {business_name}"
+    The numeric prefix is used as the customer_id key.
     """
-    def __init__(self, json_dir: str):
-        self.json_dir = Path(json_dir)
-        # Map: normalized_address -> (raw_address_key, json_data)
-        self._store: dict[str, tuple[str, dict]] = {}
-        self._load_all()
+    def __init__(self, base_dir: str):
+        self.base_dir = Path(base_dir)
+        # Maps customer_id -> Path of their folder (populated at startup, fast)
+        self._dirs: dict[str, Path] = {}
+        self._scan_dirs()
 
-    def _load_all(self):
-        for path in self.json_dir.glob("*.json"):
+    def _scan_dirs(self):
+        """Scan only folder names — no file reading yet."""
+        for customer_dir in self.base_dir.rglob("*"):
+            if not customer_dir.is_dir():
+                continue
+            m = re.match(r'^(\d+)', customer_dir.name)
+            if not m:
+                continue
+            self._dirs[m.group(1)] = customer_dir
+        logger.info(f"Found folders for {len(self._dirs)} customers.")
+
+    @staticmethod
+    def _long_path(path: Path) -> str:
+        """Extended-length path prefix on Windows to bypass MAX_PATH (260 char) limit."""
+        if sys.platform == "win32":
+            return "\\\\?\\" + str(path.resolve())
+        return str(path.resolve())
+
+    _PDF_MAX_PAGES = 20  # read at most 20 pages per PDF
+
+    @staticmethod
+    def _extract_pdf(path: Path) -> str:
+        try:
+            import pdfplumber
+            text_parts = []
+            with open(CustomerDataStore._long_path(path), "rb") as f:
+                with pdfplumber.open(f) as pdf:
+                    for page in pdf.pages[:CustomerDataStore._PDF_MAX_PAGES]:
+                        text = page.extract_text()
+                        if text:
+                            text_parts.append(text)
+            return "\n".join(text_parts).strip()
+        except Exception as e:
+            logger.warning(f"PDF extract failed {path.name}: {e}")
+            return ""
+
+    def find(self, customer_id) -> list[dict]:
+        """Load and return all TXT + PDF files for the given customer_id on demand."""
+        if customer_id is None:
+            return []
+        cid = str(customer_id).strip()
+        customer_dir = self._dirs.get(cid)
+        if customer_dir is None:
+            return []
+
+        data_list = []
+        for path in sorted(customer_dir.glob("*.txt")):
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                # The property address lives in property.results[0].Address + City + State + Zip
-                prop_result = (data.get("property") or {}).get("results") or []
-                if prop_result:
-                    r = prop_result[0]
-                    raw_addr = f"{r.get('Address','')}, {r.get('City','')}, {r.get('State','')} {r.get('ZipFive','')}"
-                else:
-                    # Fallback: derive from filename
-                    raw_addr = path.stem.replace("_", " ")
-                norm = normalize_address(raw_addr)
-                self._store[norm] = (raw_addr, data)
+                with open(self._long_path(path), encoding="utf-8", errors="replace") as f:
+                    content = f.read().strip()
+                if content:
+                    data_list.append({"filename": path.name, "content": content})
             except Exception as e:
-                logger.warning(f"Failed to load JSON {path.name}: {e}")
-        logger.info(f"Loaded {len(self._store)} JSON property files.")
+                logger.warning(f"Failed to load TXT {path.name}: {e}")
 
-    def find(self, address: str, score_cutoff: int = None) -> Optional[dict]:
-        """
-        Fuzzy-match the given address against all loaded JSON keys.
-        Returns the JSON dict if a match is found above score_cutoff, else None.
-        """
-        if score_cutoff is None:
-            score_cutoff = config.ADDRESS_MATCH_SCORE_CUTOFF
-        if not address or not isinstance(address, str):
-            return None
-        norm = normalize_address(address)
-        if not norm:
-            return None
+        PDF_SIZE_LIMIT_MB = 5
+        for path in sorted(customer_dir.glob("*.pdf")):
+            size_mb = path.stat().st_size / (1024 * 1024)
+            if size_mb > PDF_SIZE_LIMIT_MB:
+                logger.warning(f"  Skipping oversized PDF ({size_mb:.1f} MB): {path.name}")
+                continue
+            content = self._extract_pdf(path)
+            if content:
+                data_list.append({"filename": path.name, "content": content})
 
-        keys = list(self._store.keys())
-        result = process.extractOne(norm, keys, scorer=fuzz.token_sort_ratio, score_cutoff=score_cutoff)
-        if result:
-            matched_key, score, _ = result
-            raw_addr, data = self._store[matched_key]
-            logger.debug(f"Match: '{address}' -> '{raw_addr}' (score={score})")
-            return data
-        return None
+        return data_list
 
 
 # ---------------------------------------------------------------------------
@@ -251,30 +279,20 @@ def get_homestead_exemption(state: str, is_primary_residence: bool) -> tuple[flo
 # ---------------------------------------------------------------------------
 # Prompt builder
 # ---------------------------------------------------------------------------
-SYSTEM_PROMPT = """You are an AI assistant processing property data for debt recovery analysis.
-Analyze the provided Excel row and property JSON data to determine debt collectibility.
-Always respond with valid JSON only — no preamble, no explanation, no markdown code fences.
+PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompt_template.txt"
 
-Use the following homestead exemption table (2024) when calculating net collateral:
-AL=$15,000 | AK=$54,000 | AZ=$150,000 | AR=$2,500 | CA=$626,400 | CO=$250,000
-CT=$75,000 | DE=$125,000 | FL=UNLIMITED | GA=$21,500 | HI=$30,000 | ID=$175,000
-IL=$15,000 | IN=$19,300 | IA=UNLIMITED | KS=UNLIMITED | KY=$5,000 | LA=$35,000
-ME=$80,000 | MD=$25,150 | MA=$500,000 | MI=$40,475 | MN=$480,000 | MS=$75,000
-MO=$15,000 | MT=$350,000 | NE=$60,000 | NV=$605,000 | NH=$120,000 | NJ=$0
-NM=$60,000 | NY=$179,950 | NC=$35,000 | ND=$100,000 | OH=$145,425 | OK=UNLIMITED
-OR=$40,000 | PA=$0 | RI=$500,000 | SC=$63,075 | SD=UNLIMITED | TN=$5,000
-TX=UNLIMITED | UT=$42,700 | VT=$125,000 | VA=$25,000 | WA=$125,000 | WV=$35,000
-WI=$75,000 | WY=$20,000 | DC=$0
-
-UNLIMITED states (FL, IA, KS, OK, SD, TX): primary residence is fully protected — net
-collateral from that property is $0 after homestead."""
+def _load_prompt_template() -> str:
+    """Load the prompt template from prompt_template.txt."""
+    try:
+        return PROMPT_TEMPLATE_PATH.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        raise FileNotFoundError(f"prompt_template.txt not found at {PROMPT_TEMPLATE_PATH}")
 
 
 def build_analysis_prompt(row: pd.Series, property_data: list[tuple]) -> str:
     """
-    Build the analysis prompt combining the full Excel row with matched JSON files.
-    property_data: list of (label, address, json_data_or_None) tuples.
-    Returns a prompt requesting strict JSON output.
+    Build the analysis prompt by loading prompt_template.txt and injecting
+    the Excel row data, property JSON summaries, and output schema.
     """
     import math
 
@@ -289,18 +307,22 @@ def build_analysis_prompt(row: pd.Series, property_data: list[tuple]) -> str:
             continue
         row_context[str(col)] = str(val).strip()
 
-    # Build per-property sections — use summary instead of full JSON to stay under paste limit
+    # Build per-property sections from raw TXT content
     props_payload = []
     missing_json = []
-    for label, address, json_data in property_data:
-        if json_data is not None:
-            summary = extract_property_summary(json_data, label)
-            props_payload.append({"label": label, "address": address, "summary": summary})
+    for label, filename, content in property_data:
+        if content:
+            props_payload.append({"label": label, "filename": filename, "content": content})
         else:
-            missing_json.append(f"{label} ({address})")
+            missing_json.append(f"{label} ({filename})")
 
     output_schema = {
         "skip": False,
+        "Deceased Check": "",
+        "Business Bankruptcy": "",
+        "PG Bankruptcy Check": "",
+        "SOL": "",
+        "SOL Status": "",
         "Verified Equity": "",
         "Verified Liens": "",
         "Homestead Applied": "",
@@ -311,55 +333,50 @@ def build_analysis_prompt(row: pd.Series, property_data: list[tuple]) -> str:
         "Principal Balance": "",
         "Collectibility Judgment": "",
         "Recovery Summary": "",
-        "Lien Enforcement": "",
+        "Criminal records:": "",
+        "Other Assets:": "",
+        "Professional Licenses:": "",
+        "Other Owned Businesses:": "",
         "notes": "",
     }
 
     missing_note = (
-        f"No JSON data found for: {', '.join(missing_json)}. Those properties were ignored."
+        f"NOTE: No JSON data found for: {', '.join(missing_json)}. Those properties were excluded."
         if missing_json else ""
     )
 
-    prompt = f"""You are an AI assistant processing property data from an Excel file.
-
-EXCEL ROW DATA:
-{json.dumps(row_context, indent=2)}
-
-PROPERTY JSON DATA:
-{json.dumps(props_payload, indent=2)}
-
-INSTRUCTIONS:
-1. Use the FULL Excel row for context.
-2. Analyze ALL properties together to produce FINAL financial/legal outputs for this row.
-3. Ignore any "Estimated Equity $" columns from the Excel row.
-4. Do NOT mix incorrect data across properties, but the final decision must consider all valid properties.
-5. Apply homestead exemption ONLY to the primary residence (isSameMailingOrExempt=true or PrimaryResidence=true).
-6. For Collectibility Judgment use: Low / Medium / High
-   - High: Final Collateral >= Principal Balance
-   - Medium: 0 < Final Collateral < Principal Balance
-   - Low: Final Collateral <= 0
-7. Use null (not empty string) for any field where data is genuinely unavailable.
-{f'9. NOTE: {missing_note}' if missing_note else ''}
-
-════════════════════════════════════════════════
-MANDATORY OUTPUT — DO NOT DEVIATE
-════════════════════════════════════════════════
-Respond with ONLY this JSON object.
-Use EXACTLY these field names — no renaming, no nesting, no extra fields.
-Do NOT explain. Do NOT add narrative. Start with {{ end with }}.
-
-{json.dumps(output_schema, indent=2)}
-════════════════════════════════════════════════
-"""
+    template = _load_prompt_template()
+    prompt = template.replace("{EXCEL_ROW_DATA}", json.dumps(row_context, indent=2))
+    prompt = prompt.replace("{PROPERTY_DATA}", json.dumps(props_payload, indent=2))
+    prompt = prompt.replace("{MISSING_NOTE}", missing_note)
+    prompt = prompt.replace("{OUTPUT_SCHEMA}", json.dumps(output_schema, indent=2))
     return prompt.strip()
 
+
 # ---------------------------------------------------------------------------
-# Gemini browser caller
+# OpenRouter API caller
 # ---------------------------------------------------------------------------
 def call_claude_api(prompt: str, api_key: str) -> str:
-    """Submit the analysis prompt to Gemini via browser (web search enabled) and return the response."""
-    full_prompt = f"{SYSTEM_PROMPT}\n\n{'='*60}\n\n{prompt}"
-    return call_gemini_browser(full_prompt)
+    """Submit the analysis prompt to OpenRouter and return the response."""
+    from openrouter import OpenRouter
+    with OpenRouter(api_key=api_key, timeout_ms=120000) as client:
+        response = client.chat.send(
+            model=config.OPENROUTER_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a financial analysis assistant. Always respond with ONLY a valid JSON object. No preamble, no explanation, no markdown. Start with { and end with }."
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            max_tokens=config.OPENROUTER_MAX_OUTPUT_TOKENS,
+            temperature=0.1,
+        )
+    content = response.choices[0].message.content
+    return str(content) if content is not None else ""
 
 
 # ---------------------------------------------------------------------------
@@ -414,21 +431,31 @@ def parse_ai_response(response: str) -> dict:
 
     def _get(key):
         val = parsed.get(key)
+        if val is None and key.endswith(":"):
+            val = parsed.get(key[:-1])  # try without trailing colon
         return "" if val is None else str(val)
 
     return {
-        "Verified Equity":        _get("Verified Equity"),
-        "Verified Liens":         _get("Verified Liens"),
-        "Homestead Applied":      _get("Homestead Applied"),
-        "Homestead State":        _get("Homestead State"),
-        "Final Collateral":       _get("Final Collateral"),
-        "Collateral Calculation": _get("Collateral Calculation"),
-        "Collateralization":      _get("Collateralization"),
-        "Principal Balance":      _get("Principal Balance"),
-        "Collectibility Judgment":_get("Collectibility Judgment"),
-        "Recovery Summary":       _get("Recovery Summary"),
-        "Lien Enforcement":       _get("Lien Enforcement"),
-        "notes":                  _get("notes"),
+        "Deceased Check":            _get("Deceased Check"),
+        "Business Bankruptcy":       _get("Business Bankruptcy"),
+        "PG Bankruptcy Check":       _get("PG Bankruptcy Check"),
+        "SOL":                       _get("SOL"),
+        "SOL Status":                _get("SOL Status"),
+        "Verified Equity":           _get("Verified Equity"),
+        "Verified Liens":            _get("Verified Liens"),
+        "Homestead Applied":         _get("Homestead Applied"),
+        "Homestead State":           _get("Homestead State"),
+        "Final Collateral":          _get("Final Collateral"),
+        "Collateral Calculation":    _get("Collateral Calculation"),
+        "Collateralization":         _get("Collateralization"),
+        "Principal Balance":         _get("Principal Balance"),
+        "Collectibility Judgment":   _get("Collectibility Judgment"),
+        "Recovery Summary":          _get("Recovery Summary"),
+        "Criminal records:":         _get("Criminal records:"),
+        "Other Assets:":             _get("Other Assets:"),
+        "Professional Licenses:":    _get("Professional Licenses:"),
+        "Other Owned Businesses:":   _get("Other Owned Businesses:"),
+        "notes":                     _get("notes"),
     }
 
 
@@ -488,69 +515,65 @@ def detect_property_columns(columns: list[str]) -> list[tuple[str, str, str]]:
 
 def process_row(
     row: pd.Series,
-    json_store: JsonPropertyStore,
+    json_store: CustomerDataStore,
     api_key: str,
+    id_col: str = "customer_id",
 ) -> dict:
     """
     Process a single Excel row:
     1. Filter: skip if Property Status != "property found"
-    2. Find JSON files for each property address
-    3. Build prompt with full row + JSON data
+    2. Look up all files by id_col folder match
+    3. Build prompt with full row + file data
     4. Call Gemini and parse JSON response
     """
-    cust_id = row.get("CUST_NUMBER", "?")
+    cust_id = str(row.get(id_col) or row.get("customer_id") or row.get("CUST_NUMBER") or "?").strip()
 
-    # ROW FILTER — case-insensitive column lookup, value contains "property found"
-    status_col = next((c for c in row.index if c.lower() == "property status"), None)
-    property_status = str(row.get(status_col, "") or "").strip().lower() if status_col else ""
-    if "property found" not in property_status:
-        logger.info(f"  Row {cust_id}: Skipping — Property Status = '{property_status}'")
-        return {"_skip": True}
+    # ROW FILTER — accept "property status" or "property details" column
+    # Look up all files for this row by id_col folder match
+    txt_files = json_store.find(cust_id)
 
-    # Dynamically detect property columns from this row's index
-    property_cols = detect_property_columns(list(row.index))
-
-    # Collect only properties that have a confirmed JSON match
-    # If no JSON match — skip that property entirely (no web search)
-    property_data: list[tuple] = []
-    for addr_col, _equity_col, label in property_cols:
-        addr_val = row.get(addr_col)
-        if not addr_val or not isinstance(addr_val, str) or not addr_val.strip():
-            continue
-        logger.info(f"  Row {cust_id}: Looking up JSON for [{label}] -> '{addr_val}'")
-        json_data = json_store.find(addr_val)
-        if json_data:
-            property_data.append((label, addr_val, json_data))
-        else:
-            logger.warning(f"  Row {cust_id}: No JSON match for '{addr_val}' — skipped.")
-
-    if not property_data:
-        logger.warning(f"  Row {cust_id}: No JSON-matched properties found. Skipping AI call.")
+    if not txt_files:
+        logger.warning(f"  Row {cust_id}: No property folder found for '{id_col}' = '{cust_id}'.")
         blank = {col: "" for col in AI_OUTPUT_COLUMNS}
         blank["Collectibility Judgment"] = "Low"
-        blank["notes"] = "No JSON-matched property data found for this row."
+        blank["notes"] = f"No property folder found for '{id_col}' = '{cust_id}'."
         return blank
 
-    # Calculate Verified Equity from Excel estimated equity columns
-    equity_total = 0.0
-    for _addr_col, equity_col, _label in property_cols:
-        if not equity_col:
-            continue
-        val = row.get(equity_col)
-        num = pd.to_numeric(str(val).replace(",", "").replace("$", "").strip(), errors="coerce")
-        if num is not None and not pd.isna(num) and num > 0:
-            equity_total += num
-    verified_equity = f"${equity_total:,.2f}" if equity_total > 0 else ""
+    # Build property_data from all loaded files
+    property_data: list[tuple] = []
+    for i, item in enumerate(txt_files, 1):
+        label = f"Property {i}"
+        filename = item["filename"]
+        content = item["content"]
+        property_data.append((label, filename, content))
+        logger.info(f"  Row {cust_id}: Loaded [{label}] -> '{filename}'")
+
+    # Use manually-filled Verified Equity if present, otherwise let AI determine it
+    manual_ve = str(row.get("Verified Equity", "") or "").strip()
+    if manual_ve and manual_ve.lower() not in ("nan", ""):
+        try:
+            ve_num = float(manual_ve.replace("$", "").replace(",", ""))
+            verified_equity = f"${ve_num:,.2f}"
+        except (ValueError, TypeError):
+            verified_equity = manual_ve
+    else:
+        verified_equity = None  # None = let AI value through
 
     prompt = build_analysis_prompt(row, property_data)
-    logger.info(f"  Row {cust_id}: Calling Gemini API...")
+    logger.info(f"  Row {cust_id}: Calling OpenRouter API...")
     ai_response = call_claude_api(prompt, api_key)
     result = parse_ai_response(ai_response)
 
-    # Override Verified Equity with Excel values
-    result["Verified Equity"] = verified_equity
+    # Only override Verified Equity if manual value exists
+    if verified_equity is not None:
+        result["Verified Equity"] = verified_equity
 
-    result["Collateralization"] = "0"
+    # Compute Collateralization from Final Collateral
+    try:
+        fc = float(str(result.get("Final Collateral", "0")).replace("$", "").replace(",", "").strip())
+        result["Collateralization"] = "Positive Collateral" if fc > 0 else "Negative Collateral"
+    except (ValueError, TypeError):
+        result["Collateralization"] = ""
 
     return result
 
@@ -559,6 +582,11 @@ def process_row(
 # Output writer
 # ---------------------------------------------------------------------------
 AI_OUTPUT_COLUMNS = [
+    "Deceased Check",
+    "Business Bankruptcy",
+    "PG Bankruptcy Check",
+    "SOL",
+    "SOL Status",
     "Verified Equity",
     "Verified Liens",
     "Homestead Applied",
@@ -569,7 +597,10 @@ AI_OUTPUT_COLUMNS = [
     "Principal Balance",
     "Collectibility Judgment",
     "Recovery Summary",
-    "Lien Enforcement",
+    "Criminal records:",
+    "Other Assets:",
+    "Professional Licenses:",
+    "Other Owned Businesses:",
     "notes",
 ]
 
@@ -677,50 +708,87 @@ def main():
     parser.add_argument("--excel",   default=None, help=f"Excel/ODS file path (default: {config.EXCEL_FILE_PATH})")
     parser.add_argument("--json_dir",default=None, help=f"JSON folder path (default: {config.JSON_FOLDER_PATH})")
     parser.add_argument("--output",  default=None, help=f"Output Excel path (default: {config.OUTPUT_FILE_PATH})")
-    parser.add_argument("--api_key", default=None, help="Gemini API key (default: GEMINI_API_KEY from .env)")
+    parser.add_argument("--api_key", default=None, help="OpenRouter API key (default: OPENROUTER_API_KEY from .env)")
     parser.add_argument("--max_rows",type=int, default=None, help="Limit rows for testing (default: all rows)")
+    parser.add_argument("--start_from", type=int, default=0, help="Skip first N rows (resume from row N+1)")
+    parser.add_argument("--id_col",  default="customer_id", help="Column name to match with folder prefix (default: customer_id)")
+    parser.add_argument("--sheet",   default=None, help="Excel sheet name to read (default: first sheet)")
     args = parser.parse_args()
 
     # CLI args override config.py, config.py overrides defaults
     excel_path   = args.excel    or config.EXCEL_FILE_PATH
     json_dir     = args.json_dir or config.JSON_FOLDER_PATH
     output_path  = args.output   or config.OUTPUT_FILE_PATH
-    api_key      = args.api_key  or config.GEMINI_API_KEY
+    api_key      = args.api_key  or config.OPENROUTER_API_KEY
     max_rows     = args.max_rows if args.max_rows is not None else (config.MAX_ROWS or None)
+    id_col       = args.id_col
+    start_from   = args.start_from
+    sheet_name   = args.sheet
 
-    # Validate config before doing any work
-    config.validate()
+    # Validate only API key; skip path validation since CLI args may override .env paths
+    if not api_key:
+        raise ValueError("OPENROUTER_API_KEY is not set. Add it to your .env file.")
+    if not Path(excel_path).exists():
+        raise ValueError(f"Excel file not found: '{excel_path}'")
+    if not Path(json_dir).exists():
+        raise ValueError(f"JSON folder not found: '{json_dir}'")
 
     logger.info("Pipeline starting with config:")
     logger.info(f"  Excel file  : {excel_path}")
     logger.info(f"  JSON folder : {json_dir}")
     logger.info(f"  Output file : {output_path}")
-    logger.info(f"  Gemini model: {config.GEMINI_MODEL}")
+    logger.info(f"  OpenRouter model: {config.OPENROUTER_MODEL}")
     logger.info(f"  Max rows    : {max_rows if max_rows else 'All'}")
+    logger.info(f"  ID column   : {id_col}")
 
     # Load Excel
     ext = Path(excel_path).suffix.lower()
     if ext == ".ods":
-        df = pd.read_excel(excel_path, engine="odf", dtype=str)
+        df = pd.read_excel(excel_path, engine="odf", sheet_name=sheet_name or 0, dtype=str)
     else:
-        df = pd.read_excel(excel_path, dtype=str)
+        df = pd.read_excel(excel_path, sheet_name=sheet_name or 0, dtype=str)
 
     df = df.loc[:, ~df.columns.str.startswith("Unnamed")]
     logger.info(f"Loaded {len(df)} rows, {len(df.columns)} columns.")
 
+    full_df = df.copy()  # keep full dataframe for writing results
+    if start_from > 0:
+        df = df.iloc[start_from:].reset_index(drop=True)
+        logger.info(f"Resuming from row {start_from + 1} (skipping first {start_from} rows).")
     if max_rows:
         df = df.head(max_rows)
         logger.info(f"Processing limited to {max_rows} rows.")
 
-    # Load JSON store
-    json_store = JsonPropertyStore(json_dir)
+    # Load customer data store
+    json_store = CustomerDataStore(json_dir)
 
-    # Process each row
+    # Process each row — save after every row so results are visible in real time
+    blank_result = {col: "" for col in AI_OUTPUT_COLUMNS}
+
+    # If resuming, load existing results from output file for already-processed rows
     all_results: list[dict] = []
-    for idx, row in df.iterrows():
-        logger.info(f"Processing row {idx + 1}/{len(df)} | CUST_NUMBER={row.get('CUST_NUMBER', '?')}")
+    if start_from > 0 and Path(output_path).exists():
         try:
-            result = process_row(row, json_store, api_key)
+            existing = pd.read_excel(output_path, sheet_name="AI_Analysis", dtype=str)
+            for _, erow in existing.iterrows():
+                all_results.append({col: str(erow.get(col, "") or "") for col in AI_OUTPUT_COLUMNS})
+            logger.info(f"Loaded {len(all_results)} existing results from {output_path}")
+        except Exception as e:
+            logger.warning(f"Could not load existing results: {e}")
+            all_results = [dict(blank_result) for _ in range(start_from)]
+    else:
+        all_results = []
+
+    # Fill remaining slots with blanks
+    total_rows_in_excel = start_from + len(df)
+    while len(all_results) < total_rows_in_excel:
+        all_results.append(dict(blank_result))
+
+    for idx, row in df.iterrows():
+        row_id = str(row.get(id_col) or row.get('customer_id') or row.get('CUST_NUMBER') or '?').strip()
+        logger.info(f"Processing row {idx + 1}/{len(df)} | {id_col}={row_id}")
+        try:
+            result = process_row(row, json_store, api_key, id_col=id_col)
             if result.get("_skip"):
                 result = {col: "" for col in AI_OUTPUT_COLUMNS}
                 result["notes"] = "Skipped — Property Status != 'property found'"
@@ -728,10 +796,23 @@ def main():
             logger.error(f"  Row {idx}: ERROR - {e}")
             result = {col: "" for col in AI_OUTPUT_COLUMNS}
             result["notes"] = f"PIPELINE ERROR: {e}"
-        all_results.append(result)
+        all_results[start_from + idx] = result
+        # Only save after AI-processed rows (not skipped rows) to avoid slow Excel writes
+        was_skipped = result.get("notes", "").startswith("Skipped")
+        if not was_skipped:
+            try:
+                write_results(full_df, all_results, output_path)
+                logger.info(f"  Saved progress ({idx + 1}/{len(df)} rows).")
+            except Exception as e:
+                logger.warning(f"  Could not save progress: {e}")
 
-    # Write output
-    write_results(df, all_results, output_path)
+    # Final write — ensures skipped/trailing rows are included in AI_Analysis
+    try:
+        write_results(full_df, all_results, output_path)
+        logger.info(f"Final output written to: {output_path}")
+    except Exception as e:
+        logger.warning(f"Could not write final output: {e}")
+
     close_browser()
     logger.info("Pipeline complete.")
 

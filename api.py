@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 
 import config
 from main import (
-    JsonPropertyStore,
+    CustomerDataStore,
     process_row,
     write_results,
     AI_OUTPUT_COLUMNS,
@@ -100,7 +100,7 @@ def run_pipeline(
         logger.info(f"[{job_id}] {total} rows loaded.")
 
         # Load JSON store
-        json_store = JsonPropertyStore(json_dir)
+        json_store = CustomerDataStore(json_dir)
 
         # Process each row
         all_results: list[dict] = []
@@ -200,17 +200,20 @@ async def analyze(
 
     with zipfile.ZipFile(zip_path, "r") as zf:
         for member in zf.namelist():
-            if member.endswith(".json") and not member.startswith("__MACOSX"):
-                (json_dir / Path(member).name).write_bytes(zf.read(member))
+            if member.startswith("__MACOSX") or not member.endswith(".txt"):
+                continue
+            dest = json_dir / member
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(zf.read(member))
 
-    json_count = len(list(json_dir.glob("*.json")))
-    if json_count == 0:
+    txt_count = sum(1 for _ in json_dir.rglob("*.txt"))
+    if txt_count == 0:
         shutil.rmtree(job_dir)
-        raise HTTPException(400, "No .json files found inside the ZIP. Make sure you zipped the correct folder.")
+        raise HTTPException(400, "No .txt property files found inside the ZIP. Make sure you zipped the correct folder.")
 
     output_path = str(job_dir / "debt_recovery_output.xlsx")
 
-    logger.info(f"[{job_id}] Starting pipeline — {excel_name}, {json_count} JSON files.")
+    logger.info(f"[{job_id}] Starting pipeline — {excel_name}, {txt_count} TXT property files.")
 
     # Run pipeline synchronously so we can return the file directly
     try:
@@ -224,7 +227,7 @@ async def analyze(
         total = len(df)
         logger.info(f"[{job_id}] {total} rows loaded.")
 
-        json_store = JsonPropertyStore(str(json_dir))
+        json_store = CustomerDataStore(str(json_dir))
 
         all_results: list[dict] = []
         for idx, row in df.iterrows():

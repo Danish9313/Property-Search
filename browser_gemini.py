@@ -37,24 +37,63 @@ def _start_browser() -> Page:
         return _page
 
     _playwright = sync_playwright().start()
-    _context = _playwright.chromium.launch_persistent_context(
+
+    # Use system Chrome so Google accepts the session and saves login properly
+    launch_kwargs = dict(
         user_data_dir=PROFILE_DIR,
         headless=config.BROWSER_HEADLESS,
-        args=["--start-maximized"],
+        args=[
+            "--start-maximized",
+            "--disable-blink-features=AutomationControlled",
+        ],
         viewport=None,
         permissions=["clipboard-read", "clipboard-write"],
+        ignore_default_args=["--enable-automation"],
     )
+    try:
+        _context = _playwright.chromium.launch_persistent_context(
+            channel="chrome", **launch_kwargs
+        )
+        logger.info("Using system Chrome for Gemini.")
+    except Exception:
+        logger.warning("System Chrome not found — falling back to Playwright Chromium.")
+        _context = _playwright.chromium.launch_persistent_context(**launch_kwargs)
+
     _page = _context.new_page()
+    _page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
     _page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=30000)
 
-    # If not logged in — wait for user to log in manually (up to 3 minutes)
-    if "accounts.google.com" in _page.url or "signin" in _page.url.lower():
+    # Wait for page to settle then check login state
+    time.sleep(4)
+
+    def _is_logged_in() -> bool:
+        try:
+            url = _page.url
+            if "accounts.google.com" in url or "signin" in url.lower():
+                return False
+            # Check for Sign In button in page
+            btns = _page.evaluate("""
+                () => Array.from(document.querySelectorAll('a,button'))
+                         .map(b => b.innerText.trim().toLowerCase())
+            """)
+            return not any(t in ("sign in", "log in", "signin") for t in btns)
+        except Exception:
+            return True
+
+    if not _is_logged_in():
         logger.info("=" * 60)
-        logger.info("ACTION REQUIRED: Log in to your Google account in the browser window.")
-        logger.info("The session will be saved automatically after login.")
+        logger.info("ACTION REQUIRED: Log in to your Google account in the browser.")
+        logger.info("Session will be saved automatically — you will not need to log in again.")
         logger.info("=" * 60)
-        _page.wait_for_url("*gemini.google.com*", timeout=180000)
-        time.sleep(3)
+        deadline = time.time() + 180
+        while time.time() < deadline:
+            time.sleep(3)
+            if _is_logged_in():
+                logger.info("Login detected — continuing.")
+                time.sleep(3)
+                break
+        else:
+            logger.warning("Login wait timed out — proceeding anyway.")
 
     logger.info("Gemini browser session ready.")
     return _page
@@ -83,6 +122,14 @@ def close_browser():
 def _new_chat(page: Page):
     """Always navigate to a fresh URL to guarantee a clean conversation."""
     page.goto(GEMINI_URL, wait_until="domcontentloaded", timeout=30000)
+    # Wait for input field to appear before proceeding
+    try:
+        page.wait_for_selector(
+            'rich-textarea [contenteditable="true"], div[contenteditable="true"], textarea',
+            timeout=15000,
+        )
+    except Exception:
+        pass
     time.sleep(2)
 
 
@@ -120,18 +167,25 @@ def _type_and_send(page: Page, prompt: str):
         '[contenteditable="true"][aria-label*="message"]',
         '[contenteditable="true"][aria-label*="prompt"]',
         'div[contenteditable="true"]',
+        'textarea',
     ]
     input_el = None
     for sel in input_selectors:
         try:
             el = page.locator(sel).last
-            if el.is_visible(timeout=2000):
-                input_el = el
-                break
+            el.wait_for(state="visible", timeout=10000)
+            input_el = el
+            logger.info(f"Gemini input found: {sel}")
+            break
         except Exception:
             continue
 
     if input_el is None:
+        # Save screenshot to help diagnose
+        try:
+            page.screenshot(path=str(Path(__file__).parent / "gemini_debug.png"))
+        except Exception:
+            pass
         raise RuntimeError("Could not locate Gemini input field.")
 
     # Copy full prompt to OS clipboard (no size limit, works with any length)
@@ -233,7 +287,8 @@ _REQUIRED_FIELDS = [
     "Verified Equity", "Verified Liens", "Homestead Applied", "Homestead State",
     "Final Collateral", "Collateral Calculation", "Collateralization",
     "Principal Balance", "Collectibility Judgment", "Recovery Summary",
-    "Lien Enforcement", "notes",
+    "Criminal records:", "Other Assets:", "Professional Licenses:",
+    "Other Owned Businesses:", "notes",
 ]
 
 _REFORMAT_MSG = (

@@ -26,3 +26,45 @@ server.log
 # OS
 .DS_Store
 Thumbs.db
+
+
+/venv/
+/.idea
+**/__pycache__/
+**/.pytest_cache/
+/.ipynb_checkpoints/
+**/output/
+**/.DS_Store
+*.pyc
+.claude
+
+venv
+
+
+
+
+# Local data folders
+Data/
+test_extract/
+browser_profile/
+browser_profile_chatgpt/
+
+# Debug / scratch scripts
+check_*.py
+debug_*.py
+fix_*.py
+
+
+make_retry*.py
+merge_final.py
+browser_chatgpt.py
+
+# Run logs and error dumps
+run_log_*.txt
+run_err_*.txt
+debug_last_response.txt
+prompt.txt.txt
+
+# Debug images
+*.png
+chatgpt_debug.png
